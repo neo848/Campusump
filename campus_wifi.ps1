@@ -8,7 +8,7 @@
       1. Connexion initiale automatique au Wi-Fi "Campus Connecte".
       2. Choix du compte : Defaut (Campus.fsjeso@ump.ac.ma) ou Personnel.
       3. DNS Google par defaut (8.8.8.8 / 8.8.4.4) + Secours UMP.
-      4. Temps de stabilisation etendu (7s) avec negociation ARP progressive.
+      4. Temps de stabilisation etendu (25s) avec negociation ARP progressive.
       5. Test prealable du DHCP en premier lieu.
       6. Scan et ecrasement automatique des parametres IP dans la plage
          jusqu'a trouver une adresse pleinement fonctionnelle (Auto-Troubleshoot).
@@ -524,6 +524,18 @@ function Apply-StaticConfiguration([string]$adapterName, [string]$ip, [string]$m
     Write-Host "     - DNS Second.  : $secondaryDns (Google)" -ForegroundColor Green
 
     try {
+        # 0. Nettoyage prealable : supprimer toute IP existante (APIPA, ancienne statique, etc.)
+        #    Cela evite que Windows ignore le "set address" quand une APIPA 169.254.x.x est collee
+        try {
+            Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-NetIPAddress -InterfaceAlias $adapterName -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            Get-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -NextHop $_.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        } catch { }
+        Start-Sleep -Seconds 1
+
         # 1. Configuration IP Statique + Passerelle
         $procIP = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "address", "name=$adapterName", "source=static", "address=$ip", "mask=$mask", "gateway=$gateway", "gwmetric=1") -Wait -PassThru -NoNewWindow
         
@@ -557,7 +569,9 @@ function Apply-DHCPConfiguration([string]$adapterName) {
     try {
         $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "address", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
 
-        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
+        # DNS Google force meme en DHCP (plus fiable que le DNS du campus)
+        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=8.8.8.8", "register=primary", "validate=no") -Wait -PassThru -NoNewWindow
+        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=8.8.4.4", "index=2", "validate=no") -Wait -PassThru -NoNewWindow
 
         Write-Host " [*] Renouvellement du bail DHCP (ipconfig /renew)..." -ForegroundColor DarkGray
         $null = & ipconfig /renew "$adapterName" 2>$null
@@ -575,7 +589,7 @@ function Apply-DHCPConfiguration([string]$adapterName) {
 # ------------------------------------------------------------------------------
 # 8. TESTS PROGRESSIFS AVEC TEMPS DE STABILISATION ETENDU
 # ------------------------------------------------------------------------------
-function Test-ConnectionWithProgress([string]$gateway, [int]$waitSeconds = 7) {
+function Test-ConnectionWithProgress([string]$gateway, [int]$waitSeconds = 25) {
     Write-Host " [*] Stabilisation du lien Wi-Fi et negociation ARP ($waitSeconds`s) " -NoNewline -ForegroundColor DarkGray
     for ($i = 0; $i -lt $waitSeconds; $i++) {
         Start-Sleep -Seconds 1
@@ -583,19 +597,24 @@ function Test-ConnectionWithProgress([string]$gateway, [int]$waitSeconds = 7) {
     }
     Write-Host " [Pret]" -ForegroundColor Green
 
-    # Ping progressif (tente 3 fois pour absorber la latence initiale)
+    # Ping progressif (tente 6 fois avec delai etendu pour absorber la latence reseau campus)
     $pingOk = $false
-    for ($p = 1; $p -le 3; $p++) {
-        $res = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction SilentlyContinue
+    for ($p = 1; $p -le 6; $p++) {
+        $res = Test-Connection -ComputerName "8.8.8.8" -Count 2 -Quiet -ErrorAction SilentlyContinue
         if ($res) {
             $pingOk = $true
             break
         }
-        Start-Sleep -Milliseconds 800
+        Start-Sleep -Seconds 2
     }
 
     if (-not $pingOk) {
-        $pingOk = Test-Connection -ComputerName "1.1.1.1" -Count 1 -Quiet -ErrorAction SilentlyContinue
+        # Tentative de secours avec 1.1.1.1 (2 essais)
+        for ($p = 1; $p -le 2; $p++) {
+            $pingOk = Test-Connection -ComputerName "1.1.1.1" -Count 2 -Quiet -ErrorAction SilentlyContinue
+            if ($pingOk) { break }
+            Start-Sleep -Seconds 2
+        }
     }
 
     return $pingOk
@@ -674,7 +693,9 @@ function Test-DHCPAutoMode([string]$adapterName) {
     Write-Host " [*] Basculement temporaire en DHCP pour verifier si le serveur repond..." -ForegroundColor DarkGray
     
     $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "address", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
-    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
+    # DNS Google force meme en DHCP (plus fiable que le DNS du campus)
+    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=8.8.8.8", "register=primary", "validate=no") -Wait -PassThru -NoNewWindow
+    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=8.8.4.4", "index=2", "validate=no") -Wait -PassThru -NoNewWindow
     
     Write-Host " [*] Demande de bail IP (ipconfig /renew)..." -NoNewline -ForegroundColor DarkGray
     $null = Start-Process -FilePath "ipconfig.exe" -ArgumentList @("/renew", $adapterName) -Wait -PassThru -NoNewWindow
@@ -693,7 +714,37 @@ function Test-DHCPAutoMode([string]$adapterName) {
     }
 
     Write-Host " [!] Le serveur DHCP est sature (aucun bail valide ou APIPA 169.254.x.x)." -ForegroundColor Yellow
-    Write-Host " [*] Passage automatique en mode IP STATIQUE dans la plage..." -ForegroundColor Cyan
+    Write-Host " [*] Nettoyage de l'adresse APIPA residuelle avant passage en statique..." -ForegroundColor DarkGray
+
+    # Supprimer toutes les adresses IPv4 existantes (y compris APIPA 169.254.x.x)
+    # pour eviter que Windows garde l'APIPA et ignore le netsh set address statique
+    try {
+        Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-NetIPAddress -InterfaceAlias $adapterName -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        # Supprimer aussi les routes par defaut residuelles
+        Get-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -NextHop $_.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    } catch { }
+
+    # Desactiver/Reactiver la carte pour forcer un reset complet de l'etat APIPA
+    Write-Host " [*] Reset de la carte reseau (Desactivation/Reactivation)..." -ForegroundColor DarkGray
+    try {
+        Disable-NetAdapter -Name $adapterName -Confirm:$false -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        Enable-NetAdapter -Name $adapterName -Confirm:$false -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+
+        # Reconnexion automatique au Wi-Fi Campus apres le reset de la carte
+        Write-Host " [*] Reconnexion au Wi-Fi 'Campus Connecte'..." -ForegroundColor DarkGray
+        & netsh wlan connect name="Campus Connecte" interface="$adapterName" 2>$null | Out-Null
+        Start-Sleep -Seconds 4
+    } catch {
+        Write-Host " [!] Reset adaptateur echoue (non critique, on continue)." -ForegroundColor DarkYellow
+    }
+
+    Write-Host " [OK] Interface nettoyee. Passage en mode IP STATIQUE..." -ForegroundColor Cyan
     return $false
 }
 
@@ -736,8 +787,8 @@ function Invoke-AutoIpRangeHunter($profile, [string]$adapterName, [int]$maxAttem
                                             -secondaryDns $DnsSecondary `
                                             -fallbackDns $DnsFallback
 
-        # Temps de stabilisation etendu (6s) avec negociation ARP
-        $ok = Test-ConnectionWithProgress -gateway $profile.gateway -waitSeconds 6
+        # Temps de stabilisation etendu (25s) avec negociation ARP reseau campus
+        $ok = Test-ConnectionWithProgress -gateway $profile.gateway -waitSeconds 25
 
         if ($ok) {
             Write-Host ""
@@ -797,7 +848,7 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
     Write-Host ""
     Write-Host "  [2] MODE MANUEL AVEC TEMPS DE STABILISATION ETENDU :" -ForegroundColor Yellow
     Write-Host "      1. Propose une IP ou vous permet de saisir celle de votre choix." -ForegroundColor White
-    Write-Host "      2. Laisse 7 secondes pour la negociation ARP et link Wi-Fi." -ForegroundColor White
+    Write-Host "      2. Laisse 25 secondes pour la negociation ARP et link Wi-Fi." -ForegroundColor White
     Write-Host "      3. En cas d'echec, bascule automatiquement vers l'auto-troubleshoot." -ForegroundColor White
     Write-Host ""
     Show-Separator
@@ -867,8 +918,8 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
                                             -secondaryDns $DnsSecondary `
                                             -fallbackDns $DnsFallback
 
-        # Temps de stabilisation etendu (7 secondes)
-        $connOk = Test-ConnectionWithProgress -gateway $gateway -waitSeconds 7
+        # Temps de stabilisation etendu (25 secondes)
+        $connOk = Test-ConnectionWithProgress -gateway $gateway -waitSeconds 25
 
         if ($connOk) {
             Write-Host ""
@@ -884,7 +935,7 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
             Write-Host " Que souhaitez-vous faire ?" -ForegroundColor Cyan
             Write-Host "  [1] AUTO-TROUBLESHOOT : Scanner et ecraser les IP automatiquement (Recommande)" -ForegroundColor Green
             Write-Host "  [2] Saisir une autre adresse manuellement" -ForegroundColor Yellow
-            Write-Host "  [3] Reessayer le test avec plus de temps (10 secondes)" -ForegroundColor White
+            Write-Host "  [3] Reessayer le test avec plus de temps (25 secondes)" -ForegroundColor White
             Write-Host "  [4] Revenir en mode DHCP" -ForegroundColor Magenta
             Write-Host "  [0] Retourner au menu principal" -ForegroundColor Gray
             Write-Host ""
@@ -896,8 +947,8 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
             } elseif ($retryPick -eq "2") {
                 continue
             } elseif ($retryPick -eq "3") {
-                Write-Host " [*] Attente prolongee de 10 secondes..." -ForegroundColor DarkGray
-                $ok2 = Test-ConnectionWithProgress -gateway $gateway -waitSeconds 10
+                Write-Host " [*] Attente prolongee de 25 secondes..." -ForegroundColor DarkGray
+                $ok2 = Test-ConnectionWithProgress -gateway $gateway -waitSeconds 25
                 if ($ok2) {
                     Write-Host " [OK] La connexion s'est retablie avec succes !" -ForegroundColor Green
                     Pause
@@ -977,8 +1028,8 @@ function Invoke-CustomConfiguration([string]$adapterName) {
                               -secondaryDns $customDNS2 `
                               -fallbackDns $DnsFallback
 
-    # Temps de stabilisation etendu (7 secondes)
-    $ok = Test-ConnectionWithProgress -gateway $customGW -waitSeconds 7
+    # Temps de stabilisation etendu (25 secondes)
+    $ok = Test-ConnectionWithProgress -gateway $customGW -waitSeconds 25
     if ($ok) {
         Write-Host ""
         Write-Host " >>> SUCCES : CONNEXION ACTIVE ! <<<" -ForegroundColor Green
