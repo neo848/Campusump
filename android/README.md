@@ -1,53 +1,84 @@
-# 📱 Guide Wi-Fi Campus Connecte pour Android
+# 📱 Campus Connecte - Assistant Wi-Fi Android (UMP Oujda)
 
-Ce dossier contient les outils et méthodes pour maintenir la connexion Wi-Fi **Campus Connecte** sur Android et gérer l'IP Statique.
+> Équivalent Android du script Windows `campus_wifi.ps1`. Surveillance, reconnexion automatique, scan d'IP libres et configuration statique pour le réseau **Campus Connecte** de l'Université Mohammed Premier d'Oujda.
 
 ---
 
-## 🚀 Méthode 1 : Script Termux (`wifi_watchdog.sh`)
+## 🚀 Fonctionnalités
 
-### Prérequis
-1. Installez **Termux** et l'application compagnon **Termux:API** (disponibles sur [F-Droid](https://f-droid.org/en/packages/com.termux/)).
-2. Ouvrez Termux et installez les dépendances :
+| # | Fonctionnalité | Description |
+|---|---|---|
+| 1 | **Menu interactif** | Même interface que la version Windows avec choix de localisation (FSO, Qanon, ENSAO...) |
+| 2 | **Test DHCP automatique** | Vérifie si le serveur DHCP répond avant de passer en statique |
+| 3 | **Scan IP automatique** | Scanne et teste les IP de la plage jusqu'à trouver une adresse libre |
+| 4 | **Mode Watchdog** | Surveillance continue (toutes les 20s) + reconnexion automatique |
+| 5 | **Test de connectivité** | Ping passerelle, DNS Google, résolution DNS |
+| 6 | **Identifiants campus** | Affiche les identifiants Wi-Fi et portail + copie presse-papiers |
+| 7 | **Guide IP statique** | Instructions pas à pas pour configurer l'IP dans Android |
+| 8 | **Logs horodatés** | Historique dans `~/wifi_watchdog.log` |
+| 9 | **Notifications** | Toast et notifications Android via Termux:API |
+
+---
+
+## 📦 Prérequis
+
+1. Installer **Termux** depuis [F-Droid](https://f-droid.org/en/packages/com.termux/) (la version Play Store est obsolète).
+2. Installer **Termux:API** depuis [F-Droid](https://f-droid.org/en/packages/com.termux.api/).
+3. Ouvrir Termux et exécuter :
    ```bash
-   pkg update && pkg install termux-api jq -y
+   pkg update -y && pkg install termux-api jq inetutils -y
    ```
 
-### Lancement du script
-1. Copiez ou créez le script `wifi_watchdog.sh` dans Termux.
-2. Donnez les droits d'exécution et lancez-le :
-   ```bash
-   chmod +x wifi_watchdog.sh
-   ./wifi_watchdog.sh
-   ```
+---
 
-Le script vérifie toutes les 20 secondes si le smartphone est bien connecté à `Campus Connecte`. Si la connexion est rompue, il réinitialise le Wi-Fi pour forcer la reconnexion automatique.
+## ▶️ Utilisation
+
+### Mode interactif (menu complet) :
+```bash
+chmod +x wifi_watchdog.sh
+./wifi_watchdog.sh
+```
+
+### Mode surveillance directe (watchdog) :
+```bash
+./wifi_watchdog.sh --watchdog
+```
+ou
+```bash
+./wifi_watchdog.sh -w
+```
 
 ---
 
-## 🛠️ Méthode 2 : Sans script (Via MacroDroid)
+## 🗺️ Localisations supportées
 
-Si vous préférez une interface graphique sans terminal :
-1. Installez l'application gratuite **MacroDroid**.
-2. **Déclencheur (Trigger)** : *Connectivité > Wi-Fi SSID connecté/déconnecté > Déconnecté de "Campus Connecte"*.
-3. **Actions** :
-   - *Conditions/Boucles > Attendre 5 secondes*.
-   - *Connectivité > Activer le Wi-Fi*.
-   - *Connectivité > Se connecter au réseau Wi-Fi > "Campus Connecte"*.
+| # | Zone | Passerelle | Plage IP |
+|---|---|---|---|
+| 1 | FSO Bibliothèque (Groupe) | `100.121.0.1` | `100.121.192.x` - `100.121.193.x` |
+| 2 | FSO Solo (Salles Individuelles) | `100.121.0.1` | `100.121.194.x` |
+| 3 | FSO Master (Amphis) | `100.121.0.1` | `100.121.195.x` - `100.121.196.x` |
+| 4 | Qanon / Droit | `100.90.144.1` | `100.90.145.x` - `100.90.149.x` |
+| 5 | FSJESO (Économie) | `100.90.144.1` | `100.90.144.x` |
+| 6 | ENSAO | `100.96.160.1` | `100.96.180.x` - `100.96.189.x` |
 
 ---
 
-## 🌐 Configuration de l'IP Statique sur Android
+## 🌐 Configuration IP Statique Android
 
-Sur Android (sans root), l'IP statique se configure une seule fois dans le système :
-1. Allez dans **Paramètres > Réseau et Internet > Wi-Fi**.
-2. Restez appuyé sur **Campus Connecte** puis choisissez **Modifier le réseau** (ou l'icône ⚙️).
-3. Ouvrez **Options avancées** > **Paramètres IP**.
-4. Changez `DHCP` en `Statique`.
-5. Renseignez :
-   - **Adresse IP** : Ex. `100.121.195.241` (ou selon la plage de votre zone FSO/Faculté).
-   - **Passerelle** : `100.121.0.1`
-   - **Longueur du préfixe** : `16` (ou Masque `255.255.0.0`)
-   - **DNS 1** : `8.8.8.8`
-   - **DNS 2** : `8.8.4.4`
-6. Enregistrez. Android réutilisera automatiquement ces paramètres à chaque reconnexion.
+Le script **trouve l'IP libre** et vous guide pour la configurer :
+
+1. **Paramètres Android** → **Wi-Fi**
+2. Appui long sur **Campus Connecte** → **Modifier le réseau**
+3. **Options avancées** → **Paramètres IP** → **Statique**
+4. Entrez les paramètres affichés par le script
+5. Enregistrez
+
+> **Note :** L'IP statique est mémorisée par Android et réappliquée automatiquement à chaque reconnexion.
+
+---
+
+## ⚠️ Limitations Android (sans root)
+
+- Le script **ne peut pas changer l'IP automatiquement** via la ligne de commande sans root
+- Il **détecte, scanne et propose** l'IP optimale, puis ouvre les paramètres Wi-Fi pour vous
+- Le mode Watchdog **réactive le Wi-Fi** automatiquement (ne nécessite pas root)
