@@ -1,6 +1,27 @@
 # 🎓 Assistant Réseau Wi-Fi - Campus Connecté (UMP Oujda)
 
-> Script professionnel d'automatisation complète et de gestion des adresses IP statiques pour Windows, conçu pour contourner la saturation du serveur DHCP du réseau **Campus connecte** à l'Université Mohammed Premier d'Oujda.
+> Scripts d'automatisation, watchdog de reconnexion et gestion des IP statiques pour **Windows** et **Android**, conçus pour contourner la saturation du serveur DHCP du réseau **Campus connecte** à l'Université Mohammed Premier d'Oujda.
+
+---
+
+## 📁 Structure du Projet
+
+```text
+campus/
+├── windows/                    # Outils et scripts pour Windows
+│   ├── campus_wifi.ps1         # Script principal (Auto-troubleshoot, IP statique, scan)
+│   ├── wifi_watchdog.ps1       # Script de surveillance et reconnexion automatique
+│   ├── Lancer_Campus_Wifi.bat  # Lanceur avec élévation administrateur (UAC)
+│   ├── campus_config.json      # Configuration des plages IP et facultés
+│   ├── Wi-Fi-Campus Connecte.xml # Profil XML 802.1X
+│   └── campus.txt
+│
+├── android/                    # Outils et guides pour Android
+│   ├── wifi_watchdog.sh        # Script shell Termux de surveillance Wi-Fi
+│   └── README.md               # Guide Termux, MacroDroid et configuration IP statique
+│
+└── README.md                   # Documentation générale du projet
+```
 
 ---
 
