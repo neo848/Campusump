@@ -697,9 +697,16 @@ function Test-DHCPAutoMode([string]$adapterName) {
     $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=8.8.8.8", "register=primary", "validate=no") -Wait -PassThru -NoNewWindow
     $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=8.8.4.4", "index=2", "validate=no") -Wait -PassThru -NoNewWindow
     
-    Write-Host " [*] Demande de bail IP (ipconfig /renew)..." -NoNewline -ForegroundColor DarkGray
-    $null = Start-Process -FilePath "ipconfig.exe" -ArgumentList @("/renew", $adapterName) -Wait -PassThru -NoNewWindow
-    Write-Host " [Fait]" -ForegroundColor DarkGray
+    Write-Host " [*] Demande de bail IP (ipconfig /renew, timeout 15s)..." -NoNewline -ForegroundColor DarkGray
+    $renewProc = Start-Process -FilePath "ipconfig.exe" -ArgumentList @("/renew", $adapterName) -PassThru -NoNewWindow
+    $finished = $renewProc.WaitForExit(15000)
+    if (-not $finished) {
+        Write-Host " [Timeout]" -ForegroundColor Yellow
+        Write-Host " [!] Le serveur DHCP ne repond pas (15s ecoulees). Passage au mode statique..." -ForegroundColor Yellow
+        try { $renewProc.Kill() } catch { }
+    } else {
+        Write-Host " [Fait]" -ForegroundColor DarkGray
+    }
 
     Start-Sleep -Seconds 4
 
