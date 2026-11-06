@@ -1,6 +1,25 @@
 # 🎓 Assistant Réseau Wi-Fi - Campus Connecté (UMP Oujda)
 
-> Scripts d'automatisation, watchdog de reconnexion et gestion des IP statiques pour **Windows** et **Android**, conçus pour contourner la saturation du serveur DHCP du réseau **Campus connecte** à l'Université Mohammed Premier d'Oujda.
+> Scripts d'automatisation, watchdog de reconnexion et gestion des IP statiques pour **Windows 10 et 11**, conçus pour contourner la saturation du serveur DHCP du réseau **Campus connecte** à l'Université Mohammed Premier d'Oujda.
+
+## Installation simple sur Windows
+
+1. Telechargez [Campus-Connecte-Windows.zip](https://github.com/neo848/Campusump/raw/refs/heads/main/dist/Campus-Connecte-Windows.zip), puis faites **Extraire tout**.
+2. Dans le dossier extrait, double-cliquez sur **INSTALLER.bat**.
+3. Ensuite, lancez **Campus Connecte** depuis le raccourci sur le Bureau.
+   Acceptez la demande administrateur au lancement de l'assistant.
+
+L'installation ne modifie pas la connexion et ne lance pas l'assistant.
+Les fichiers sont copies dans `%LOCALAPPDATA%\Programs\CampusConnecte` ; le raccourci
+utilise le Bureau Windows de l'utilisateur, y compris un Bureau redirige vers OneDrive.
+Le dossier extrait peut ensuite etre supprime. Pour mettre a jour, quittez l'assistant
+et relancez le nouvel installateur : le compte chiffre et la configuration locale restent conserves.
+Depuis le depot, le meme fichier **INSTALLER.bat** fonctionne directement.
+
+Pour generer le ZIP : `powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows/Build_Package.ps1`.
+Le resultat se trouve dans `dist/Campus-Connecte-Windows.zip`.
+Test de l'installation sans lancer l'assistant :
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/installer_regression.ps1`.
 
 ---
 
@@ -9,16 +28,13 @@
 ```text
 campus/
 ├── windows/                    # Outils et scripts pour Windows
+│   ├── personal_account.ps1    # Stockage chiffre du compte personnel
 │   ├── campus_wifi.ps1         # Script principal (Auto-troubleshoot, IP statique, scan)
 │   ├── wifi_watchdog.ps1       # Script de surveillance et reconnexion automatique
 │   ├── Lancer_Campus_Wifi.bat  # Lanceur avec élévation administrateur (UAC)
 │   ├── campus_config.json      # Configuration des plages IP et facultés
 │   ├── Wi-Fi-Campus Connecte.xml # Profil XML 802.1X
 │   └── campus.txt
-│
-├── android/                    # Outils et guides pour Android
-│   ├── wifi_watchdog.sh        # Script shell Termux de surveillance Wi-Fi
-│   └── README.md               # Guide Termux, MacroDroid et configuration IP statique
 │
 └── README.md                   # Documentation générale du projet
 ```
@@ -50,7 +66,7 @@ campus/
    - Configuration EAP-TTLS 802.1X directe dans Windows.
 
 5. **DNS Google Forcé (Toujours) :**
-   - Le DNS est **toujours** `8.8.8.8` / `8.8.4.4`, même en mode DHCP.
+   - Pendant la configuration Campus, le DNS est `8.8.8.8` / `8.8.4.4`, même en mode DHCP.
    - Secours UMP : `100.127.255.70`
 
 ---
@@ -88,11 +104,12 @@ Default Gateway . . . . . . . . . : 100.121.0.1 (et 10.16.33.122)
 
 ### 📥 Étape 1 : Récupérer les fichiers
 
-Copiez ces **3 fichiers** sur le PC (clé USB, téléchargement, etc.) :
+Copiez ces **4 fichiers** sur le PC (clé USB, téléchargement, etc.) :
 
 ```
 📁 campus/
 ├── 📄 Lancer_Campus_Wifi.bat        ← Le lanceur (double-cliquer dessus)
+├── 📄 personal_account.ps1         ← Stockage du compte personnel
 ├── 📄 campus_wifi.ps1               ← Le script principal
 └── 📄 Wi-Fi-Campus Connecte.xml     ← Le profil Wi-Fi (importé automatiquement)
 ```
@@ -134,3 +151,36 @@ Copiez ces **3 fichiers** sur le PC (clé USB, téléchargement, etc.) :
 
 **Q: Le script modifie-t-il des paramètres permanents ?**
 > Le script change l'IP et le DNS de la carte Wi-Fi. Pour tout remettre comme avant, utilisez l'option **`[D] Revenir en mode DHCP`** dans le menu.
+
+## Compte personnel et sortie (Windows)
+
+Gardez `windows/personal_account.ps1` a cote de `campus_wifi.ps1` lors de la copie des fichiers.
+Le choix **[2] Mon propre compte** demande le mot de passe avec une saisie masquee.
+L'email et le mot de passe sont chiffres ensemble par Windows DPAPI dans
+`%LOCALAPPDATA%\CampusConnecte\personal-account.dpapi`, avec des permissions limitees
+au compte Windows courant. Le fichier n'est pas portable vers un autre compte Windows
+ou ordinateur. Utilisez toujours le meme compte Windows lors de l'elevation UAC.
+
+Au lancement, l'email apparait sous la forme `a***@ump.ac.ma`. Dans le mode personnel,
+choisissez **Reutiliser**, **Remplacer** (nouvel email et mot de passe), ou **Annuler**.
+Le remplacement est atomique ; le compte par defaut [1] ne remplace jamais votre compte
+personnel. Aucun mot de passe personnel n'est copie dans le presse-papiers.
+Windows conserve aussi les identifiants 802.1X configures dans son profil Wi-Fi.
+
+**[0] Quitter** ou **Ctrl+C** remet les interfaces selectionnees pendant la session en IPv4 DHCP et
+DNS automatiques. **[D]** applique immediatement cette meme restauration. Les DNS Google
+ne restent forces que pendant les operations de connexion du script. La restauration
+est egalement tentee si une erreur interrompt l'application. Elle peut interrompre
+la connexion actuelle : quittez lorsque vous avez termine de l'utiliser.
+
+Utilisez le menu [0] ou Ctrl+C pour quitter proprement. Le nettoyage utilise une execution PowerShell independante de celle interrompue et protege la restauration contre un second Ctrl+C. Fermer brutalement la fenetre, tuer le
+processus ou couper le courant ne garantit pas l'execution du nettoyage PowerShell.
+Dans ce cas, utilisez [D] au prochain lancement ou remettez IP et DNS en automatique
+dans les parametres Windows.
+
+### Verification sans modifier le reseau
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows_regression.ps1`
+verifie le chiffrement avec des comptes fictifs et simule toutes les commandes reseau.
+Les fichiers de test temporaires sont supprimes a la fin.
+Le test `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/ctrl_c_cleanup.ps1` interrompt reellement une execution PowerShell et verifie le nettoyage avec un adaptateur simule, sans charger de commande reseau.

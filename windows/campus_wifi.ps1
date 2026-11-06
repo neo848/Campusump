@@ -1,3 +1,4 @@
+﻿. (Join-Path $PSScriptRoot 'personal_account.ps1')
 <#
 ================================================================================
     CAMPUS CONNECTE - CONFIGURATEUR IP STATIQUE WINDOWS (UMP OUJDA)
@@ -243,6 +244,8 @@ function Set-CampusCredentialsInWindows([string]$username, [string]$password) {
         }
     }
 
+    $username = [Security.SecurityElement]::Escape($username)
+    $password = [Security.SecurityElement]::Escape($password)
     $eapXml = @"
 <EapHostUserCredentials xmlns="http://www.microsoft.com/provisioning/EapHostUserCredentials"
   xmlns:eapCommon="http://www.microsoft.com/provisioning/EapCommon">
@@ -270,10 +273,7 @@ function Set-CampusCredentialsInWindows([string]$username, [string]$password) {
         }
     } catch { }
 
-    try {
-        Set-Clipboard -Value $password -ErrorAction SilentlyContinue
-        Write-Host " [*] Note : Le mot de passe a aussi ete copie dans votre presse-papiers." -ForegroundColor DarkGray
-    } catch { }
+
 }
 
 function Connect-CampusWifiInitial([string]$adapterName) {
@@ -295,7 +295,9 @@ function Connect-CampusWifiInitial([string]$adapterName) {
     Write-Host ""
     Show-Separator
 
-    $choice = Read-Host " Votre choix [1]"
+    $savedAccount = Read-PersonalAccount
+    if ($savedAccount) { Write-Host (" Compte personnel disponible [2] : " + (Get-MaskedEmail $savedAccount.UserName)) -ForegroundColor Cyan }
+    do { $choice = Read-Host " Votre choix [1]" } until ([string]::IsNullOrWhiteSpace($choice) -or $choice -in "1", "2", "3")
     if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
 
     $userEmail = "Campus.fsjeso@ump.ac.ma"
@@ -303,15 +305,17 @@ function Connect-CampusWifiInitial([string]$adapterName) {
 
     if ($choice -eq "2") {
         Write-Host ""
-        $userEmail = (Read-Host " Entrez votre email etudiant UMP (ex: nom.prenom@ump.ac.ma)").Trim()
-        $userPass = (Read-Host " Entrez votre mot de passe").Trim()
+        $personal = Select-PersonalAccount
+        if (!$personal) { return }
+        $userEmail = $personal.UserName
+        $userPass = $personal.GetNetworkCredential().Password
     } elseif ($choice -eq "3") {
         return
     }
 
     Write-Host ""
-    Write-Host " [*] Configuration des identifiants pour : $userEmail" -ForegroundColor Cyan
-    Set-CampusCredentialsInWindows -username $userEmail -password $userPass
+    Write-Host (" [*] Configuration des identifiants pour : " + (Get-MaskedEmail $userEmail)) -ForegroundColor Cyan
+    try { Set-CampusCredentialsInWindows -username $userEmail -password $userPass } finally { $userPass = $null; $personal = $null }
 
     Write-Host " [*] Connexion au point d'acces 'Campus Connecte'..." -ForegroundColor Cyan
     & netsh wlan connect name="Campus Connecte" interface="$adapterName" | Out-Null
@@ -562,30 +566,17 @@ function Apply-StaticConfiguration([string]$adapterName, [string]$ip, [string]$m
 }
 
 function Apply-DHCPConfiguration([string]$adapterName) {
-    Write-Host ""
-    Write-Host " [*] Reinitialisation de la carte en mode DHCP (Automatique)..." -ForegroundColor Cyan
-    Write-Host "     - Carte reseau : $adapterName" -ForegroundColor Gray
-
-    try {
-        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "address", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
-
-        # DNS Google force meme en DHCP (plus fiable que le DNS du campus)
-        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=8.8.8.8", "register=primary", "validate=no") -Wait -PassThru -NoNewWindow
-        $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=8.8.4.4", "index=2", "validate=no") -Wait -PassThru -NoNewWindow
-
-        Write-Host " [*] Renouvellement du bail DHCP (ipconfig /renew)..." -ForegroundColor DarkGray
-        $null = & ipconfig /renew "$adapterName" 2>$null
-        $null = & ipconfig /flushdns
-
-        Write-Host " [OK] Mode DHCP restaure avec succes !" -ForegroundColor Green
-        Start-Sleep -Seconds 2
-        return $true
-    } catch {
-        Write-Host " [ERREUR] Impossible de restaurer le DHCP: $_" -ForegroundColor Red
-        return $false
+    $ok = $true
+    foreach ($kind in @('address', 'dnsservers')) {
+        & netsh interface ipv4 set $kind "name=$adapterName" source=dhcp | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Echec de restauration $kind sur $adapterName (code $LASTEXITCODE)."
+            $ok = $false
+        }
     }
+    if ($ok) { Write-Host " [OK] IP et DNS automatiques restaures sur $adapterName." -ForegroundColor Green }
+    return $ok
 }
-
 # ------------------------------------------------------------------------------
 # 8. TESTS PROGRESSIFS AVEC TEMPS DE STABILISATION ETENDU
 # ------------------------------------------------------------------------------
@@ -1108,127 +1099,161 @@ function Select-NetworkAdapter([ref]$currentAdapter) {
 # ------------------------------------------------------------------------------
 # 15. BOUCLE DU MENU PRINCIPAL
 # ------------------------------------------------------------------------------
+function Restore-CampusSession([string[]]$Adapters) {
+    # Ctrl+C stops the application's pipeline. Use an independent pipeline for cleanup.
+    $cleanup = [PowerShell]::Create()
+    $oldControlC = $null
+    try {
+        try {
+            $oldControlC = [Console]::TreatControlCAsInput
+            [Console]::TreatControlCAsInput = $true
+        } catch { }
+        $definition = ${function:Apply-DHCPConfiguration}.ToString()
+        $null = $cleanup.AddScript({
+            param($definition, $adapters)
+            Set-Item Function:Apply-DHCPConfiguration ([scriptblock]::Create($definition))
+            foreach ($adapter in ($adapters | Select-Object -Unique)) {
+                if (!$adapter) { continue }
+                try {
+                    if (!(Apply-DHCPConfiguration -adapterName $adapter)) {
+                        [Console]::WriteLine("[!] Verifiez IP/DNS automatiques sur $adapter : restauration incomplete.")
+                    }
+                } catch {
+                    [Console]::WriteLine("[!] Restauration impossible sur $adapter. Retablissez IP/DNS automatiques dans Windows.")
+                }
+            }
+        }).AddArgument($definition).AddArgument($Adapters)
+        [Console]::WriteLine('Restauration IP DHCP et DNS automatiques...')
+        $null = $cleanup.Invoke()
+    } finally {
+        $cleanup.Dispose()
+        if ($null -ne $oldControlC) { [Console]::TreatControlCAsInput = $oldControlC }
+    }
+}
 function Start-CampusWifiApp {
     Ensure-AdminPrivileges
 
     $activeAdapterName = Get-WifiAdapterName
 
-    # Verification et proposition de connexion initiale si non connecte
-    $wlanCheck = netsh wlan show interfaces 2>$null
-    if ($wlanCheck -notmatch "Campus Connecte") {
+    $sessionAdapters = @($activeAdapterName)
+    try {
+        # Choix du compte a chaque lancement
         Connect-CampusWifiInitial -adapterName $activeAdapterName
-    }
 
-    $running = $true
+        $running = $true
 
-    while ($running) {
-        Show-Banner
-        Show-CurrentAdapterStatus -adapterName $activeAdapterName
-        Show-Separator
+        while ($running) {
+            Show-Banner
+            Show-CurrentAdapterStatus -adapterName $activeAdapterName
+            Show-Separator
 
-        Write-Host " CHOISISSEZ VOTRE LOCALISATION SUR LE CAMPUS :" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "   [1] FSO Biblio    - Bibliotheque / Zone Groupe (Faculte des Sciences)" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
-        Write-Host "                      Plage IP : 100.121.192.x - 100.121.193.x  (ex: 100.121.192.241)" -ForegroundColor DarkCyan
-        Write-Host "                      [!] Bibliotheque en GROUPE - IP differente de Solo" -ForegroundColor DarkYellow
-        Write-Host ""
-        Write-Host "   [2] FSO Solo      - Salles Individuelles / Solo (Faculte des Sciences)" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
-        Write-Host "                      Plage IP : 100.121.194.x uniquement  (ex: 100.121.194.144)" -ForegroundColor DarkCyan
-        Write-Host "                      [!] Salles SOLO - IP differente de la Biblio Groupe" -ForegroundColor DarkYellow
-        Write-Host ""
-        Write-Host "   [3] FSO Master    - Master / Amphis (Faculte des Sciences)" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
-        Write-Host "                      Plage IP : 100.121.195.x - 100.121.196.x  (ex: 100.121.195.100)" -ForegroundColor DarkCyan
-        Write-Host ""
-        Write-Host "   [4] Qanon / Limen- Faculte de Droit (Amphis / Limen)" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.90.144.1 | Masque: 255.255.240.0" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "   [5] FSJESO       - Economie, Gestion & Administration" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.90.144.1 | Masque: 255.255.240.0" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "   [6] ENSAO        - Ecole Nationale des Sciences Appliquees" -ForegroundColor White
-        Write-Host "                      Passerelle: 100.96.160.1 | Masque: 255.255.224.0" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "   [7] Personnalise - Entree manuelle d'une IP / Passerelle / Masque" -ForegroundColor Yellow
-        Write-Host ""
-        Show-Separator
-        Write-Host " ACTIONS ET OUTILS :" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "   [8] Reconnecter / Configurer le compte Wi-Fi (Defaut ou Personnel)" -ForegroundColor Cyan
-        Write-Host "   [9] Tester la connexion actuelle (Ping Passerelle, DNS, 8.8.8.8)" -ForegroundColor White
-        Write-Host "   [D] Revenir en mode DHCP (Automatique)" -ForegroundColor Green
-        Write-Host "   [I] Voir les identifiants Wi-Fi & portail (Campus.fsjeso@ump.ac.ma)" -ForegroundColor Magenta
-        Write-Host "   [W] Changer de carte reseau (Actuelle: $activeAdapterName)" -ForegroundColor Gray
-        Write-Host "   [0] Quitter" -ForegroundColor Red
-        Write-Host ""
-        Show-Separator
+            Write-Host " CHOISISSEZ VOTRE LOCALISATION SUR LE CAMPUS :" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "   [1] FSO Biblio    - Bibliotheque / Zone Groupe (Faculte des Sciences)" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
+            Write-Host "                      Plage IP : 100.121.192.x - 100.121.193.x  (ex: 100.121.192.241)" -ForegroundColor DarkCyan
+            Write-Host "                      [!] Bibliotheque en GROUPE - IP differente de Solo" -ForegroundColor DarkYellow
+            Write-Host ""
+            Write-Host "   [2] FSO Solo      - Salles Individuelles / Solo (Faculte des Sciences)" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
+            Write-Host "                      Plage IP : 100.121.194.x uniquement  (ex: 100.121.194.144)" -ForegroundColor DarkCyan
+            Write-Host "                      [!] Salles SOLO - IP differente de la Biblio Groupe" -ForegroundColor DarkYellow
+            Write-Host ""
+            Write-Host "   [3] FSO Master    - Master / Amphis (Faculte des Sciences)" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.121.0.1  | Masque: 255.255.0.0" -ForegroundColor DarkGray
+            Write-Host "                      Plage IP : 100.121.195.x - 100.121.196.x  (ex: 100.121.195.100)" -ForegroundColor DarkCyan
+            Write-Host ""
+            Write-Host "   [4] Qanon / Limen- Faculte de Droit (Amphis / Limen)" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.90.144.1 | Masque: 255.255.240.0" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "   [5] FSJESO       - Economie, Gestion & Administration" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.90.144.1 | Masque: 255.255.240.0" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "   [6] ENSAO        - Ecole Nationale des Sciences Appliquees" -ForegroundColor White
+            Write-Host "                      Passerelle: 100.96.160.1 | Masque: 255.255.224.0" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "   [7] Personnalise - Entree manuelle d'une IP / Passerelle / Masque" -ForegroundColor Yellow
+            Write-Host ""
+            Show-Separator
+            Write-Host " ACTIONS ET OUTILS :" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "   [8] Reconnecter / Configurer le compte Wi-Fi (Defaut ou Personnel)" -ForegroundColor Cyan
+            Write-Host "   [9] Tester la connexion actuelle (Ping Passerelle, DNS, 8.8.8.8)" -ForegroundColor White
+            Write-Host "   [D] Revenir en mode DHCP (Automatique)" -ForegroundColor Green
+            Write-Host "   [I] Voir les identifiants Wi-Fi & portail (Campus.fsjeso@ump.ac.ma)" -ForegroundColor Magenta
+            Write-Host "   [W] Changer de carte reseau (Actuelle: $activeAdapterName)" -ForegroundColor Gray
+            Write-Host "   [0 ou Ctrl+C] Quitter et restaurer IP / DNS automatiques" -ForegroundColor Red
+            Write-Host ""
+            Show-Separator
 
-        $menuChoice = Read-Host " Entrez votre choix [0-9 ou D/I/W]"
+            $menuChoice = Read-Host " Entrez votre choix [0-9 ou D/I/W]"
 
-        switch ($menuChoice.ToUpper()) {
-            "1" {
-                $fsoProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso" }
-                Invoke-LocationWorkflow -profile $fsoProfile -adapterName $activeAdapterName
-            }
-            "2" {
-                $fsoSoloProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso_solo" }
-                Invoke-LocationWorkflow -profile $fsoSoloProfile -adapterName $activeAdapterName
-            }
-            "3" {
-                $fsoMasterProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso_master" }
-                Invoke-LocationWorkflow -profile $fsoMasterProfile -adapterName $activeAdapterName
-            }
-            "4" {
-                $qanonProfile = $DefaultProfiles | Where-Object { $_.id -eq "qanon" }
-                Invoke-LocationWorkflow -profile $qanonProfile -adapterName $activeAdapterName
-            }
-            "5" {
-                $fsjesoProfile = $DefaultProfiles | Where-Object { $_.id -eq "fsjeso" }
-                Invoke-LocationWorkflow -profile $fsjesoProfile -adapterName $activeAdapterName
-            }
-            "6" {
-                $ensaoProfile = $DefaultProfiles | Where-Object { $_.id -eq "ensao" }
-                Invoke-LocationWorkflow -profile $ensaoProfile -adapterName $activeAdapterName
-            }
-            "7" {
-                Invoke-CustomConfiguration -adapterName $activeAdapterName
-            }
-            "8" {
-                Connect-CampusWifiInitial -adapterName $activeAdapterName
-            }
-            "9" {
-                Show-Banner
-                $routes = Get-NetRoute -InterfaceAlias $activeAdapterName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1
-                $gw = if ($routes) { $routes.NextHop } else { $null }
-                Test-ConnectionDiagnostic -gateway $gw
-                Pause
-            }
-            "D" {
-                Show-Banner
-                Apply-DHCPConfiguration -adapterName $activeAdapterName
-                Test-ConnectionDiagnostic -gateway $null
-                Pause
-            }
-            "I" {
-                Show-CampusCredentials
-            }
-            "W" {
-                Select-NetworkAdapter -currentAdapter ([ref]$activeAdapterName)
-            }
-            "0" {
-                $running = $false
-                Write-Host ""
-                Write-Host " Merci d'avoir utilise le configurateur Campus Connecte. Bonnes etudes !" -ForegroundColor Cyan
-                Write-Host ""
-                Start-Sleep -Seconds 1
-            }
-            default {
-                Write-Host " [!] Choix non reconnu. Veuillez choisir une option valide." -ForegroundColor Yellow
-                Start-Sleep -Seconds 1
+            switch ($menuChoice.ToUpper()) {
+                "1" {
+                    $fsoProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso" }
+                    Invoke-LocationWorkflow -profile $fsoProfile -adapterName $activeAdapterName
+                }
+                "2" {
+                    $fsoSoloProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso_solo" }
+                    Invoke-LocationWorkflow -profile $fsoSoloProfile -adapterName $activeAdapterName
+                }
+                "3" {
+                    $fsoMasterProfile = $DefaultProfiles | Where-Object { $_.id -eq "fso_master" }
+                    Invoke-LocationWorkflow -profile $fsoMasterProfile -adapterName $activeAdapterName
+                }
+                "4" {
+                    $qanonProfile = $DefaultProfiles | Where-Object { $_.id -eq "qanon" }
+                    Invoke-LocationWorkflow -profile $qanonProfile -adapterName $activeAdapterName
+                }
+                "5" {
+                    $fsjesoProfile = $DefaultProfiles | Where-Object { $_.id -eq "fsjeso" }
+                    Invoke-LocationWorkflow -profile $fsjesoProfile -adapterName $activeAdapterName
+                }
+                "6" {
+                    $ensaoProfile = $DefaultProfiles | Where-Object { $_.id -eq "ensao" }
+                    Invoke-LocationWorkflow -profile $ensaoProfile -adapterName $activeAdapterName
+                }
+                "7" {
+                    Invoke-CustomConfiguration -adapterName $activeAdapterName
+                }
+                "8" {
+                    Connect-CampusWifiInitial -adapterName $activeAdapterName
+                }
+                "9" {
+                    Show-Banner
+                    $routes = Get-NetRoute -InterfaceAlias $activeAdapterName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    $gw = if ($routes) { $routes.NextHop } else { $null }
+                    Test-ConnectionDiagnostic -gateway $gw
+                    Pause
+                }
+                "D" {
+                    Show-Banner
+                    Apply-DHCPConfiguration -adapterName $activeAdapterName
+                    Test-ConnectionDiagnostic -gateway $null
+                    Pause
+                }
+                "I" {
+                    Show-CampusCredentials
+                }
+                "W" {
+                    Select-NetworkAdapter -currentAdapter ([ref]$activeAdapterName)
+                    if ($activeAdapterName -notin $sessionAdapters) { $sessionAdapters += $activeAdapterName }
+                }
+                "0" {
+                    $running = $false
+                    Write-Host ""
+                    Write-Host " Merci d'avoir utilise le configurateur Campus Connecte. Bonnes etudes !" -ForegroundColor Cyan
+                    Write-Host ""
+                    Start-Sleep -Seconds 1
+                }
+                default {
+                    Write-Host " [!] Choix non reconnu. Veuillez choisir une option valide." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 1
+                }
             }
         }
+    } finally {
+        Restore-CampusSession -Adapters $sessionAdapters
     }
 }
 
