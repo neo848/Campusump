@@ -6,7 +6,7 @@ function Install-CampusApp {
         [string]$DesktopDirectory = [Environment]::GetFolderPath('DesktopDirectory')
     )
     $ErrorActionPreference = 'Stop'
-    $files = @('campus_wifi.ps1', 'personal_account.ps1', 'Lancer_Campus_Wifi.bat', 'Wi-Fi-Campus Connecte.xml', 'campus_config.json')
+    $files = @('campus_wifi.ps1', 'Lancer_Campus_Wifi.bat', 'Wi-Fi-Campus Connecte.xml', 'campus_config.json')
     foreach ($file in $files) {
         if (!(Test-Path -LiteralPath (Join-Path $SourceDirectory $file) -PathType Leaf)) {
             throw "Fichier manquant : $file. Extrayez tout le ZIP avant de lancer INSTALLER.bat."
