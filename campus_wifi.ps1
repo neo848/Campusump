@@ -348,7 +348,63 @@ function Set-CampusCredentialsInWindows([string]$username, [string]$password) {
 
 }
 
+function Get-CampusConnectionState([string]$adapterName) {
+    $adapter = Get-NetAdapter -Name $adapterName -ErrorAction SilentlyContinue
+    if (!$adapter -or $adapter.Status -ne 'Up') { return 'Disconnected' }
+    $addresses = @(Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -ne '127.0.0.1' })
+    $valid = @($addresses | Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '0.0.0.0' })
+    if (!$valid.Count) {
+        if ($addresses | Where-Object { $_.IPAddress -like '169.254.*' }) { return 'APIPA' }
+        return 'NoAddress'
+    }
+    # TCP, avec adresse source imposee : ne pas confondre avec une autre interface.
+    # Deux destinations independantes, sans envoyer de donnees ni utiliser le DNS.
+    foreach ($address in $valid) {
+        foreach ($target in @('1.1.1.1', '8.8.8.8')) {
+            $client = $null
+            $pending = $null
+            try {
+                $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($address.IPAddress), 0)
+                $client = [Net.Sockets.TcpClient]::new($endpoint)
+                $pending = $client.BeginConnect($target, 443, $null, $null)
+                if ($pending.AsyncWaitHandle.WaitOne(1000)) {
+                    $client.EndConnect($pending)
+                    return 'Online'
+                }
+            } catch { } finally {
+                if ($client) { $client.Close() }
+                if ($pending) { $pending.AsyncWaitHandle.Close() }
+            }
+        }
+    }
+    return 'Unverified'
+}
+
+function Test-PreserveCampusConnection([string]$adapterName) {
+    $state = Get-CampusConnectionState $adapterName
+    if ($state -eq 'Online') {
+        Write-Host ' [OK] Connexion deja operationnelle : aucun changement.' -ForegroundColor Green
+        return $true
+    }
+    if ($state -eq 'Unverified') {
+        Write-Host ' IP valide, mais acces Internet non confirme (filtrage ou portail possible).' -ForegroundColor Yellow
+        $answer = Read-Host ' Conserver la connexion ? [O] Oui / N pour autoriser la reconfiguration'
+        return ($answer -notmatch '^(n|non)$')
+    }
+    return $false
+}
+
+function Register-CampusNetworkChange([string]$adapterName) {
+    if (!$script:ChangedAdapters) { $script:ChangedAdapters = @() }
+    if ($adapterName -notin $script:ChangedAdapters) { $script:ChangedAdapters += $adapterName }
+}
 function Connect-CampusWifiInitial([string]$adapterName) {
+    if (Test-PreserveCampusConnection $adapterName) { return }
+    if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') {
+        Write-Host ' APIPA detectee : choisissez votre zone pour configurer une IP statique.'
+        return
+    }
     Show-Banner
     Write-Host " ================= CONNEXION INITIALE AU WI-FI CAMPUS ==================" -ForegroundColor Cyan
     Write-Host "  Cette etape vous connecte au reseau et configure votre compte." -ForegroundColor Gray
@@ -387,6 +443,7 @@ function Connect-CampusWifiInitial([string]$adapterName) {
 
     Write-Host ""
     Write-Host (" [*] Configuration des identifiants pour : " + (Get-MaskedEmail $userEmail)) -ForegroundColor Cyan
+    if (Test-PreserveCampusConnection $adapterName) { $userPass = $null; return }
     try { Set-CampusCredentialsInWindows -username $userEmail -password $userPass } finally { $userPass = $null; $personal = $null }
 
     Write-Host " [*] Connexion au point d'acces 'Campus Connecte'..." -ForegroundColor Cyan
@@ -590,6 +647,8 @@ function Show-CurrentAdapterStatus([string]$adapterName) {
 # 7. CONFIGURATION RESEAU (NETSH & POWERSHELL)
 # ------------------------------------------------------------------------------
 function Apply-StaticConfiguration([string]$adapterName, [string]$ip, [string]$mask, [string]$gateway, [string]$primaryDns, [string]$secondaryDns, [string]$fallbackDns) {
+    if (Test-PreserveCampusConnection $adapterName) { return $true }
+    Register-CampusNetworkChange $adapterName
     Write-Host ""
     Write-Host " [*] Ecrasement et application de la configuration statique..." -ForegroundColor Cyan
     Write-Host "     - Carte reseau : $adapterName" -ForegroundColor Gray
@@ -751,6 +810,9 @@ function Test-ConnectionDiagnostic([string]$gateway) {
 # 9. TEST PREALABLE DU MODE DHCP
 # ------------------------------------------------------------------------------
 function Test-DHCPAutoMode([string]$adapterName) {
+    if (Test-PreserveCampusConnection $adapterName) { return $true }
+    if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') { return $false }
+    Register-CampusNetworkChange $adapterName
     Write-Host ""
     Write-Host " ================= ETAPE 1 : TEST DU SERVEUR DHCP =================" -ForegroundColor Cyan
     Write-Host " [*] Basculement temporaire en DHCP pour verifier si le serveur repond..." -ForegroundColor DarkGray
@@ -895,6 +957,12 @@ function Invoke-AutoIpRangeHunter($profile, [string]$adapterName, [int]$maxAttem
 # 11. WORKFLOW COMPLET DE LOCALISATION (AVEC CHOIX AUTO OU MANUEL)
 # ------------------------------------------------------------------------------
 function Invoke-LocationWorkflow($profile, [string]$adapterName) {
+    if (Test-PreserveCampusConnection $adapterName) { Pause; return }
+    if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') {
+        Write-Host ' APIPA detectee : passage direct a la recherche IP statique pour cette zone.'
+        $null = Invoke-AutoIpRangeHunter -profile $profile -adapterName $adapterName
+        return
+    }
     $gateway = $profile.gateway
     $mask = $profile.subnet_mask
     $calc = Get-SubnetCalculation -gateway $gateway -subnetMask $mask
@@ -1045,6 +1113,7 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
 # 12. CONFIGURATION MANUELLE / PERSONNALISEE
 # ------------------------------------------------------------------------------
 function Invoke-CustomConfiguration([string]$adapterName) {
+    if (Test-PreserveCampusConnection $adapterName) { Pause; return }
     Show-Banner
     Write-Host " [ CONFIGURATION RESEAU MANUELLE / PERSONNALISEE ]" -ForegroundColor Cyan
     Write-Host " Entrez les parametres de votre choix :" -ForegroundColor Gray
@@ -1207,7 +1276,7 @@ function Start-CampusWifiApp {
 
     $activeAdapterName = Get-WifiAdapterName
 
-    $sessionAdapters = @($activeAdapterName)
+    $script:ChangedAdapters = @()
     try {
         # Choix du compte a chaque lancement
         Connect-CampusWifiInitial -adapterName $activeAdapterName
@@ -1300,7 +1369,7 @@ function Start-CampusWifiApp {
                 }
                 "D" {
                     Show-Banner
-                    Apply-DHCPConfiguration -adapterName $activeAdapterName
+                    if (!(Test-PreserveCampusConnection $activeAdapterName)) { $null = Apply-DHCPConfiguration -adapterName $activeAdapterName }
                     Test-ConnectionDiagnostic -gateway $null
                     Pause
                 }
@@ -1309,7 +1378,7 @@ function Start-CampusWifiApp {
                 }
                 "W" {
                     Select-NetworkAdapter -currentAdapter ([ref]$activeAdapterName)
-                    if ($activeAdapterName -notin $sessionAdapters) { $sessionAdapters += $activeAdapterName }
+
                 }
                 "0" {
                     $running = $false
@@ -1325,7 +1394,7 @@ function Start-CampusWifiApp {
             }
         }
     } finally {
-        Restore-CampusSession -Adapters $sessionAdapters
+        if ($script:ChangedAdapters.Count) { Restore-CampusSession -Adapters $script:ChangedAdapters }
     }
 }
 
