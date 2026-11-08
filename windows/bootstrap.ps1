@@ -1,4 +1,4 @@
-﻿# Installation Windows depuis le depot public, sans lancement de l'assistant Wi-Fi.
+# Installation Windows depuis le depot public, sans lancement de l'assistant Wi-Fi.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'neo848/Campusump'
