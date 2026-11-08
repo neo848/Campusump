@@ -402,7 +402,7 @@ function Register-CampusNetworkChange([string]$adapterName) {
 function Connect-CampusWifiInitial([string]$adapterName) {
     if (Test-PreserveCampusConnection $adapterName) { return }
     if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') {
-        Write-Host ' APIPA detectee : choisissez votre zone pour configurer une IP statique.'
+        Write-Host ' APIPA detectee : un essai DHCP sera effectue avant la configuration statique.'
         return
     }
     Show-Banner
@@ -811,72 +811,27 @@ function Test-ConnectionDiagnostic([string]$gateway) {
 # ------------------------------------------------------------------------------
 function Test-DHCPAutoMode([string]$adapterName) {
     if (Test-PreserveCampusConnection $adapterName) { return $true }
-    if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') { return $false }
     Register-CampusNetworkChange $adapterName
-    Write-Host ""
-    Write-Host " ================= ETAPE 1 : TEST DU SERVEUR DHCP =================" -ForegroundColor Cyan
-    Write-Host " [*] Basculement temporaire en DHCP pour verifier si le serveur repond..." -ForegroundColor DarkGray
-    
-    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "address", "name=$adapterName", "source=dhcp") -Wait -PassThru -NoNewWindow
-    # DNS Google force meme en DHCP (plus fiable que le DNS du campus)
-    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "set", "dnsservers", "name=$adapterName", "source=static", "address=8.8.8.8", "register=primary", "validate=no") -Wait -PassThru -NoNewWindow
-    $null = Start-Process -FilePath "netsh.exe" -ArgumentList @("interface", "ipv4", "add", "dnsservers", "name=$adapterName", "address=8.8.4.4", "index=2", "validate=no") -Wait -PassThru -NoNewWindow
-    
-    Write-Host " [*] Demande de bail IP (ipconfig /renew, timeout 15s)..." -NoNewline -ForegroundColor DarkGray
-    $renewProc = Start-Process -FilePath "ipconfig.exe" -ArgumentList @("/renew", $adapterName) -PassThru -NoNewWindow
-    $finished = $renewProc.WaitForExit(15000)
-    if (-not $finished) {
-        Write-Host " [Timeout]" -ForegroundColor Yellow
-        Write-Host " [!] Le serveur DHCP ne repond pas (15s ecoulees). Passage au mode statique..." -ForegroundColor Yellow
-        try { $renewProc.Kill() } catch { }
-    } else {
-        Write-Host " [Fait]" -ForegroundColor DarkGray
+    Write-Host ' [*] Essai DHCP et DNS automatiques (renouvellement limite a 15 secondes)...'
+    foreach ($kind in @('address', 'dnsservers')) {
+        & netsh interface ipv4 set $kind "name=$adapterName" source=dhcp | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Impossible de configurer $kind en automatique sur $adapterName." }
     }
-
-    Start-Sleep -Seconds 4
-
-    $netIP = Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($netIP -and $netIP.IPAddress -notlike "169.254.*" -and $netIP.IPAddress -ne "0.0.0.0") {
-        Write-Host " [*] IP attribuee par DHCP : $($netIP.IPAddress)" -ForegroundColor Yellow
-        $dhcpInternet = Test-ConnectionWithProgress -gateway $null -waitSeconds 3
-        if ($dhcpInternet) {
-            Write-Host " >>> [SUCCES] Le serveur DHCP fonctionne et Internet est accessible ! <<<" -ForegroundColor Green
-            return $true
-        }
-    }
-
-    Write-Host " [!] Le serveur DHCP est sature (aucun bail valide ou APIPA 169.254.x.x)." -ForegroundColor Yellow
-    Write-Host " [*] Nettoyage de l'adresse APIPA residuelle avant passage en statique..." -ForegroundColor DarkGray
-
-    # Supprimer toutes les adresses IPv4 existantes (y compris APIPA 169.254.x.x)
-    # pour eviter que Windows garde l'APIPA et ignore le netsh set address statique
+    $renew = $null
     try {
-        Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-NetIPAddress -InterfaceAlias $adapterName -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        $renew = Start-Process -FilePath 'ipconfig.exe' -ArgumentList @('/renew', ('"' + $adapterName + '"')) -PassThru -NoNewWindow
+        if (!$renew.WaitForExit(15000)) {
+            $renew.Kill()
+            Write-Host ' [!] Delai DHCP atteint.'
         }
-        # Supprimer aussi les routes par defaut residuelles
-        Get-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-NetRoute -InterfaceAlias $adapterName -DestinationPrefix "0.0.0.0/0" -NextHop $_.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+    } finally {
+        if ($renew) {
+            if (!$renew.HasExited) { $renew.Kill() }
+            $renew.Dispose()
         }
-    } catch { }
-
-    # Desactiver/Reactiver la carte pour forcer un reset complet de l'etat APIPA
-    Write-Host " [*] Reset de la carte reseau (Desactivation/Reactivation)..." -ForegroundColor DarkGray
-    try {
-        Disable-NetAdapter -Name $adapterName -Confirm:$false -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        Enable-NetAdapter -Name $adapterName -Confirm:$false -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-
-        # Reconnexion automatique au Wi-Fi Campus apres le reset de la carte
-        Write-Host " [*] Reconnexion au Wi-Fi 'Campus Connecte'..." -ForegroundColor DarkGray
-        & netsh wlan connect name="Campus Connecte" interface="$adapterName" 2>$null | Out-Null
-        Start-Sleep -Seconds 4
-    } catch {
-        Write-Host " [!] Reset adaptateur echoue (non critique, on continue)." -ForegroundColor DarkYellow
     }
-
-    Write-Host " [OK] Interface nettoyee. Passage en mode IP STATIQUE..." -ForegroundColor Cyan
+    if (Test-PreserveCampusConnection $adapterName) { return $true }
+    Write-Host ' [!] DHCP sans connexion utilisable. Passage a la configuration par zone.'
     return $false
 }
 
@@ -958,11 +913,7 @@ function Invoke-AutoIpRangeHunter($profile, [string]$adapterName, [int]$maxAttem
 # ------------------------------------------------------------------------------
 function Invoke-LocationWorkflow($profile, [string]$adapterName) {
     if (Test-PreserveCampusConnection $adapterName) { Pause; return }
-    if ((Get-CampusConnectionState $adapterName) -eq 'APIPA') {
-        Write-Host ' APIPA detectee : passage direct a la recherche IP statique pour cette zone.'
-        $null = Invoke-AutoIpRangeHunter -profile $profile -adapterName $adapterName
-        return
-    }
+    if (Test-DHCPAutoMode $adapterName) { Pause; return }
     $gateway = $profile.gateway
     $mask = $profile.subnet_mask
     $calc = Get-SubnetCalculation -gateway $gateway -subnetMask $mask
@@ -996,11 +947,7 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
 
     if ($modeChoice -eq "1") {
         # 1. Test du DHCP en premier
-        $dhcpOk = Test-DHCPAutoMode -adapterName $adapterName
-        if ($dhcpOk) {
-            Pause
-            return
-        }
+        # Le test DHCP a deja ete effectue avant le choix du mode.
 
         # 2. DHCP ayant echoue, traverser la plage automatiquement
         $null = Invoke-AutoIpRangeHunter -profile $profile -adapterName $adapterName -maxAttempts 10
@@ -1113,7 +1060,7 @@ function Invoke-LocationWorkflow($profile, [string]$adapterName) {
 # 12. CONFIGURATION MANUELLE / PERSONNALISEE
 # ------------------------------------------------------------------------------
 function Invoke-CustomConfiguration([string]$adapterName) {
-    if (Test-PreserveCampusConnection $adapterName) { Pause; return }
+    if (Test-DHCPAutoMode $adapterName) { Pause; return }
     Show-Banner
     Write-Host " [ CONFIGURATION RESEAU MANUELLE / PERSONNALISEE ]" -ForegroundColor Cyan
     Write-Host " Entrez les parametres de votre choix :" -ForegroundColor Gray

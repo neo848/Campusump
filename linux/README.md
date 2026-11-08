@@ -31,7 +31,7 @@ lanceur `~/.local/bin/campuse`. Elle ne change pas le reseau et n'installe aucun
 3. Reutilisation d'un profil Campus existant, avec email masque, ou installation/remplacement
    explicite du compte via l'utilitaire fourni. Ne jamais utiliser une IP statique pour
    contourner une erreur d'authentification.
-4. Si APIPA ou configuration IP incomplete apres authentification, choix de la zone,
+4. Essai DHCP/DNS automatiques limite a 15 secondes, meme en APIPA. En cas d'echec IP apres authentification, choix de la zone,
    verification ARP des conflits, puis au maximum 10 IP candidates. `sudo arping` peut
    demander le mot de passe Linux ; NetworkManager utilise ses autorisations habituelles.
 5. Les essais utilisent un clone temporaire du profil, avec reconnexion possible lors du

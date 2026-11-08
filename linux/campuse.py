@@ -138,6 +138,23 @@ class Session:
         nm('connection', 'modify', '--temporary', 'uuid', self.temporary,
            'connection.autoconnect', 'no')
 
+    def try_dhcp(self):
+        print('Essai DHCP et DNS automatiques (15 secondes maximum pour activation)...')
+        nm('connection', 'modify', '--temporary', 'uuid', self.temporary,
+           'ipv4.method', 'auto', 'ipv4.addresses', '', 'ipv4.gateway', '',
+           'ipv4.dns', '', 'ipv4.ignore-auto-dns', 'no', 'ipv4.dhcp-timeout', '15')
+        self.changed = True
+        result = nm('--wait', '15', '--ask', 'connection', 'up', 'uuid', self.temporary,
+                    'ifname', self.device, interactive=True, check=False)
+        if preserve(self.device):
+            return True
+        state = field('GENERAL.STATE', 'device', 'show', self.device).split()[0]
+        reason = field('GENERAL.REASON', 'device', 'show', self.device).split()[0]
+        if result.returncode and state not in ('70', '100') and reason not in ('5', '6'):
+            raise RuntimeError('Authentification ou activation echouee : aucune IP statique forcee.')
+        print('DHCP sans connexion utilisable : choix de la zone pour une IP statique.')
+        return False
+
     def apply(self, address, zone):
         nm('connection', 'modify', '--temporary', 'uuid', self.temporary,
            'ipv4.method', 'manual', 'ipv4.addresses', f"{address}/{zone['cidr']}",
@@ -169,7 +186,7 @@ class Session:
             nm('connection', 'delete', 'uuid', self.temporary)
 
 
-def repair(device, original, dhcp_failed=False):
+def repair(device, original, dhcp_failed=False, session=None):
     if preserve(device):
         return
     if not shutil.which('arping'):
@@ -180,9 +197,11 @@ def repair(device, original, dhcp_failed=False):
         raise RuntimeError('Wi-Fi non authentifie / configuration IP non atteinte. Verifiez le compte avant de choisir une IP.')
     zone_data = json.loads((HERE / 'zones.json').read_text(encoding='utf-8'))
     zone = choose([(z, z['name']) for z in zone_data], 'Votre zone sur le campus')
-    session = Session(device, original)
+    owned = session is None
+    session = session or Session(device, original)
     try:
-        session.prepare()
+        if owned:
+            session.prepare()
         tested = set()
         for _ in range(10):
             if not session.changed and preserve(device):
@@ -216,12 +235,17 @@ def repair(device, original, dhcp_failed=False):
                     return
         print('Aucune connexion valide apres 10 essais. Retour en automatique.')
     finally:
-        old = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-        try:
-            session.close()
-        finally:
-            for sig, handler in old.items():
-                signal.signal(sig, handler)
+        if owned:
+            finish_session(session)
+
+
+def finish_session(session):
+    old = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        session.close()
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
 
 def main():
@@ -251,19 +275,14 @@ def main():
             return
     if preserve(device):
         return
-    dhcp_failed = False
-    if current != profile:
-        result = nm('--ask', 'connection', 'up', 'uuid', profile, 'ifname', device,
-                    interactive=True, check=False)
-        if result.returncode:
-            state = field('GENERAL.STATE', 'device', 'show', device).split()[0]
-            reason = field('GENERAL.REASON', 'device', 'show', device).split()[0]
-            dhcp_failed = reason in ('5', '6')
-            if state != '70' and not dhcp_failed:
-                raise RuntimeError('Connexion non etablie : verifiez compte/certificats et signal Wi-Fi. Aucune IP forcee.')
-    if preserve(device):
-        return
-    repair(device, profile, dhcp_failed=dhcp_failed)
+    session = Session(device, profile)
+    try:
+        session.prepare()
+        if session.try_dhcp():
+            return
+        repair(device, profile, dhcp_failed=True, session=session)
+    finally:
+        finish_session(session)
 
 
 def interrupted(signum, frame):
