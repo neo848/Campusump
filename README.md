@@ -31,8 +31,7 @@ irm https://raw.githubusercontent.com/neo848/Campusump/main/windows/bootstrap.ps
 Attendez le message **Installation terminée !**. Le raccourci **Campus Connecte** apparaît
 sur votre Bureau, y compris si celui-ci est synchronisé avec OneDrive.
 
-La commande télécharge et exécute l'installateur de ce dépôt. Les fichiers de l'application
-sont téléchargés depuis une même révision GitHub avant installation. Le dépôt doit être public.
+La commande télécharge et exécute l'installateur de ce dépôt
 
 ### 3. Autre méthode : télécharger le ZIP
 
