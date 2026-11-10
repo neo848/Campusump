@@ -17,6 +17,8 @@ import uuid
 HERE = Path(__file__).resolve().parent
 SSID = 'Campus Connecte'
 REPAIR_ALLOWED = set()
+ACTIVATION_WAIT = 90
+DHCP_TIMEOUT = 30
 
 
 def command(args, check=True, interactive=False, timeout=35):
@@ -27,8 +29,28 @@ def command(args, check=True, interactive=False, timeout=35):
     return result
 
 
-def nm(*args, **kwargs):
-    return command(['nmcli', '--wait', '20', *args], **kwargs)
+def nm(*args, wait=20, **kwargs):
+    # Le garde-fou Python doit laisser nmcli terminer son propre delai.
+    kwargs.setdefault('timeout', wait + 15)
+    return command(['nmcli', '--wait', str(wait), *args], **kwargs)
+
+
+def activate(profile, device, ask=False):
+    options = ('--ask',) if ask else ()
+    try:
+        return nm(*options, 'connection', 'up', 'uuid', profile, 'ifname', device,
+                  wait=ACTIVATION_WAIT, interactive=ask, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Activation Wi-Fi sans reponse dans le delai imparti. '
+                           'Verifiez NetworkManager, le signal et le compte Campus.') from exc
+
+
+def activation_error(result, state, reason):
+    message = (f'Delai d\'activation depasse ({ACTIVATION_WAIT} secondes).'
+               if result.returncode == 3 else 'Activation Wi-Fi non aboutie.')
+    return RuntimeError(f'{message} Etat NetworkManager : {state} ; raison : {reason}. '
+                        'Verifiez le signal, le compte et le certificat. '
+                        'Aucune IP statique forcee.')
 
 
 def field(name, *args):
@@ -139,19 +161,21 @@ class Session:
            'connection.autoconnect', 'no')
 
     def try_dhcp(self):
-        print('Essai DHCP et DNS automatiques (15 secondes maximum pour activation)...')
+        print(f'Essai DHCP et DNS automatiques (activation Wi-Fi : {ACTIVATION_WAIT} s maximum, '
+              f'dont DHCP : {DHCP_TIMEOUT} s)...')
         nm('connection', 'modify', '--temporary', 'uuid', self.temporary,
            'ipv4.method', 'auto', 'ipv4.addresses', '', 'ipv4.gateway', '',
-           'ipv4.dns', '', 'ipv4.ignore-auto-dns', 'no', 'ipv4.dhcp-timeout', '15')
+           'ipv4.dns', '', 'ipv4.ignore-auto-dns', 'no', 'ipv4.dhcp-timeout', str(DHCP_TIMEOUT))
         self.changed = True
-        result = nm('--wait', '15', '--ask', 'connection', 'up', 'uuid', self.temporary,
-                    'ifname', self.device, interactive=True, check=False)
+        result = activate(self.temporary, self.device, ask=True)
         if preserve(self.device):
             return True
-        state = field('GENERAL.STATE', 'device', 'show', self.device).split()[0]
-        reason = field('GENERAL.REASON', 'device', 'show', self.device).split()[0]
-        if result.returncode and state not in ('70', '100') and reason not in ('5', '6'):
-            raise RuntimeError('Authentification ou activation echouee : aucune IP statique forcee.')
+        state = field('GENERAL.STATE', 'device', 'show', self.device)
+        reason = field('GENERAL.REASON', 'device', 'show', self.device)
+        # 70/100 : configuration IP / connexion active ; 5/6 : echec de configuration IP.
+        # Un timeout seul ne prouve pas que l'authentification a reussi.
+        if state.partition(' ')[0] not in ('70', '100') and reason.partition(' ')[0] not in ('5', '6'):
+            raise activation_error(result, state, reason)
         print('DHCP sans connexion utilisable : choix de la zone pour une IP statique.')
         return False
 
@@ -161,8 +185,7 @@ class Session:
            'ipv4.gateway', zone['gateway'], 'ipv4.dns', '8.8.8.8,8.8.4.4',
            'ipv4.ignore-auto-dns', 'yes')
         self.changed = True  # Avant la commande : meme une activation interrompue exige le nettoyage.
-        result = nm('--ask', 'connection', 'up', 'uuid', self.temporary, 'ifname', self.device,
-                    interactive=True, check=False)
+        result = activate(self.temporary, self.device, ask=True)
         if result.returncode:
             reason = field('GENERAL.REASON', 'device', 'show', self.device).split()[0]
             if reason not in ('5', '6'):
@@ -173,6 +196,7 @@ class Session:
             if self.clone_name:
                 nm('connection', 'delete', 'id', self.clone_name, check=False)
             return
+        errors = []
         try:
             current = active(self.device)
             # Ne pas deconnecter un autre reseau choisi entre-temps par l'utilisateur.
@@ -181,9 +205,21 @@ class Session:
                 nm('connection', 'modify', '--temporary', 'uuid', self.original,
                    'ipv4.method', 'auto', 'ipv4.addresses', '', 'ipv4.gateway', '',
                    'ipv4.dns', '', 'ipv4.ignore-auto-dns', 'no')
-                nm('connection', 'up', 'uuid', self.original, 'ifname', self.device)
+                result = activate(self.original, self.device)
+                if result.returncode:
+                    detail = (f'delai de {ACTIVATION_WAIT} secondes depasse'
+                              if result.returncode == 3 else
+                              (result.stderr or 'activation refusee').strip())
+                    raise RuntimeError('Reconnexion au profil d\'origine impossible : ' + detail)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            errors.append(str(exc))
         finally:
-            nm('connection', 'delete', 'uuid', self.temporary)
+            try:
+                nm('connection', 'delete', 'uuid', self.temporary)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                errors.append('Suppression du profil temporaire impossible : ' + str(exc))
+        if errors:
+            raise RuntimeError(' ; '.join(errors))
 
 
 def repair(device, original, dhcp_failed=False, session=None):
@@ -240,9 +276,16 @@ def repair(device, original, dhcp_failed=False, session=None):
 
 
 def finish_session(session):
+    original_error = sys.exc_info()[1]
     old = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        session.close()
+        try:
+            session.close()
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            if original_error is None:
+                raise
+            # Garder l'erreur initiale (ou l'interruption), et signaler aussi le nettoyage.
+            print('Attention, nettoyage incomplet : ' + str(exc), file=sys.stderr)
     finally:
         for sig, handler in old.items():
             signal.signal(sig, handler)
@@ -279,6 +322,8 @@ def main():
     try:
         session.prepare()
         if session.try_dhcp():
+            input('Connexion conservee. Gardez ce terminal ouvert. '
+                  'Entree ou Ctrl+C pour terminer et restaurer DHCP/DNS : ')
             return
         repair(device, profile, dhcp_failed=True, session=session)
     finally:
